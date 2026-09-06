@@ -16,6 +16,8 @@ from .nodes import (
     LTX25SpatialSplitParams,
     LTX25ReferenceParams,
     LTX25ICLoRALoader,
+    MMH3SaveLatentAV,
+    MMH3LoadLatentAV,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -32,6 +34,8 @@ NODE_CLASS_MAPPINGS = {
     "LTX25SpatialSplitParams": LTX25SpatialSplitParams,
     "LTX25ICLoRALoader": LTX25ICLoRALoader,
     "LTX25ReferenceParams": LTX25ReferenceParams,
+    "MMH3SaveLatentAV": MMH3SaveLatentAV,
+    "MMH3LoadLatentAV": MMH3LoadLatentAV,
 }
 
 # front-end JS: auto-show/hide tile size vs rows/cols inputs on the two
@@ -52,6 +56,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LTX25SpatialSplitParams": "LTX25 Spatial Split Params",
     "LTX25ICLoRALoader": "LTX25 IC-LoRA Loader (MSR)",
     "LTX25ReferenceParams": "LTX25 Reference Params",
+    "MMH3SaveLatentAV": "MMH3 Save AV Latent",
+    "MMH3LoadLatentAV": "MMH3 Load AV Latent",
 }
 
 
@@ -72,6 +78,8 @@ class MMH3UltimateUpscaleExtension(ComfyExtension):
             LTX25SpatialSplitParams,
             LTX25ReferenceParams,
             LTX25ICLoRALoader,
+            MMH3SaveLatentAV,
+            MMH3LoadLatentAV,
         ]
 
 

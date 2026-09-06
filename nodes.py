@@ -2786,3 +2786,125 @@ class LTX25UltimateUpscale(io.ComfyNode):
 
         out = {"samples": comfy.nested_tensor.NestedTensor((acc_v, acc_a))}
         return io.NodeOutput(out, segments_debug, tiles_debug)
+
+
+# ---------------------------------------------------------------------------
+# H3 AV-latent cache (base sampling -> disk -> upscale-only re-runs).
+#
+# The stock ComfyUI SaveLatent/LoadLatent CANNOT round-trip an H3 AV latent:
+#   * SaveLatent calls samples["samples"].contiguous() - the H3 nested
+#     (video+audio) latent is a comfy.nested_tensor.NestedTensor, which has no
+#     .contiguous(), and safetensors (SaveLatent's serializer) cannot pickle
+#     the object anyway.
+#   * LoadLatent returns a plain .float() tensor, which fails
+#     MMH3UltimateUpscale's is_h3_av_latent gate (needs is_nested + 2 tensors).
+#
+# These two nodes torch.save/torch.load the NestedTensor directly (bit-exact,
+# ~3 MB per 0.5MP base) so the base sampler's denoised latent can be cached and
+# the upscale stage re-run WITHOUT re-sampling the base.
+# ---------------------------------------------------------------------------
+
+def _h3_av_latent_dict(samples):
+    return {"samples": samples["samples"]}
+
+
+class MMH3SaveLatentAV(io.ComfyNode):
+    """Save a denoised MiniMax H3 AV latent to disk for a later upscale-only run.
+
+    The stock 'Save Latent' cannot serialize the H3 nested (video+audio)
+    latent. This node torch.saves it directly (lossless) and passes it through
+    unchanged on its output, so it can also sit inline instead of as a sink."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3SaveLatentAV",
+            display_name="MMH3 Save AV Latent",
+            category="model/latent/minimax",
+            description=(
+                "Save the denoised MiniMax H3 AV latent (nested video+audio) to "
+                "disk with torch (lossless) so the upscale stage can re-run "
+                "without re-sampling the base. The stock 'Save Latent' cannot "
+                "serialize the H3 nested latent."
+            ),
+            is_output_node=True,
+            search_aliases=["save h3 latent", "save av latent", "cache latent", "export h3 latent"],
+            inputs=[
+                io.Latent.Input("samples",
+                                tooltip="Denoised MiniMax H3 AV latent (nested video + audio)."),
+                io.String.Input("filename_prefix", default="latents/ComfyUI-MMH3",
+                                tooltip="Output path (subfolder/prefix); a _NNNNN_.h3latent suffix is added automatically."),
+            ],
+            outputs=[
+                io.Latent.Output("samples",
+                                 tooltip="The same AV latent, passed through unchanged."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, samples, filename_prefix) -> io.NodeOutput:
+        out_dir = folder_paths.get_output_directory()
+        full_output_folder, filename, counter, subfolder, prefix = \
+            folder_paths.get_save_image_path(filename_prefix, out_dir)
+        file = f"{filename}_{counter:05d}_.h3latent"
+        path = os.path.join(full_output_folder, file)
+        # torch.save keeps the NestedTensor object intact (bit-exact).
+        torch.save(_h3_av_latent_dict(samples), path)
+        return io.NodeOutput(
+            samples,
+            ui={"latents": [{"filename": file, "subfolder": subfolder, "type": "output"}]},
+        )
+
+
+class MMH3LoadLatentAV(io.ComfyNode):
+    """Load a cached MiniMax H3 AV latent (saved by 'MMH3 Save AV Latent').
+
+    Returns the latent as a NestedTensor so the upscaler's is_h3_av_latent gate
+    passes. Feeds both the upscaler's latent input and the sink's VAEDecodeAudio
+    (the cached latent carries the audio)."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3LoadLatentAV",
+            display_name="MMH3 Load AV Latent",
+            category="model/latent/minimax",
+            description=(
+                "Load a MiniMax H3 AV latent previously saved by 'MMH3 Save AV "
+                "Latent' (from the input directory) and return it as a nested "
+                "(video+audio) latent for MMH3UltimateUpscale."
+            ),
+            search_aliases=["load h3 latent", "load av latent", "import h3 latent"],
+            inputs=[
+                io.String.Input("latent", default="",
+                                tooltip="Basename of the .h3latent file in the input directory (D:\\AI\\input)."),
+            ],
+            outputs=[
+                io.Latent.Output("samples",
+                                 tooltip="The loaded AV latent (nested video + audio)."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, latent) -> io.NodeOutput:
+        in_dir = folder_paths.get_input_directory()
+        path = os.path.join(in_dir, latent)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"MMH3LoadLatentAV: '{latent}' not found in input dir {in_dir}")
+        data = torch.load(path, map_location="cpu", weights_only=False)
+        nt = data["samples"]
+        if not hasattr(nt, "is_nested") or nt.is_nested is False or len(nt.tensors) != 2:
+            raise ValueError(
+                f"MMH3LoadLatentAV: '{latent}' is not a valid H3 AV latent "
+                "(expected a nested video+audio latent saved by 'MMH3 Save AV Latent')")
+        return io.NodeOutput({"samples": nt})
+
+    @classmethod
+    def IS_CHANGED(cls, latent):
+        import hashlib
+        path = os.path.join(folder_paths.get_input_directory(), latent or "")
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).digest().hex()
